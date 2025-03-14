@@ -645,6 +645,216 @@ def generate_image(image_model, prompt: str, size: str = "1024x1024") -> Optiona
             # 将URL对象转换为字符串进行检查
             api_base_str = str(api_base) if api_base else ""
             
+            # 检查是否是ModelScope API
+            is_modelscope = "modelscope.cn" in api_base_str
+            if is_modelscope:
+                logger.info(f"检测到ModelScope API: {api_base_str}")
+                try:
+                    # ModelScope API使用正确的端点
+                    import requests
+                    import json
+                    
+                    # 构建正确的API URL - 使用官方端点
+                    if "://" in api_base_str:
+                        protocol, rest = api_base_str.split("://", 1)
+                        domain = rest.split("/")[0]
+                        api_url = f"{protocol}://{domain}/v1/images/generations"
+                    else:
+                        api_url = f"https://{api_base_str}/v1/images/generations"
+                    
+                    logger.info(f"使用ModelScope API URL: {api_url}")
+                    
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {image_model['client'].api_key}"
+                    }
+                    
+                    # 构建请求数据
+                    data = {
+                        "model": image_model["model"],
+                        "prompt": prompt,
+                        "n": 1,
+                        "size": size,
+                        "response_format": "url"
+                    }
+                    
+                    # 发送请求
+                    logger.info(f"发送请求到ModelScope: {api_url}")
+                    logger.info(f"请求数据: {data}")
+                    response = requests.post(api_url, headers=headers, json=data)
+                    response.raise_for_status()
+                    
+                    # 解析响应
+                    result = response.json()
+                    logger.info(f"ModelScope响应: {result}")
+                    
+                    # 从响应中提取URL
+                    if 'data' in result and len(result['data']) > 0 and 'url' in result['data'][0]:
+                        url = result['data'][0]['url']
+                        logger.info(f"从ModelScope响应中提取的URL: {url}")
+                    # 检查ModelScope特定的响应格式
+                    elif 'images' in result and len(result['images']) > 0 and 'url' in result['images'][0]:
+                        url = result['images'][0]['url']
+                        logger.info(f"从ModelScope images字段提取的URL: {url}")
+                    else:
+                        # 如果没有URL，尝试从其他字段提取
+                        logger.info("标准URL字段不存在，尝试从其他字段提取")
+                        
+                        # 检查是否包含图像数据或其他URL字段
+                        if 'data' in result and len(result['data']) > 0:
+                            data_item = result['data'][0]
+                            if 'b64_json' in data_item:
+                                # 处理Base64编码的图像
+                                from PIL import Image
+                                import io
+                                import base64
+                                import tempfile
+                                import os
+                                
+                                base64_data = data_item['b64_json']
+                                image_data = base64.b64decode(base64_data)
+                                
+                                # 保存到临时文件
+                                temp_dir = tempfile.gettempdir()
+                                temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                                
+                                with open(temp_file, "wb") as f:
+                                    f.write(image_data)
+                                
+                                # 使用文件URL
+                                url = f"file://{temp_file}"
+                                logger.info(f"创建了Base64图像文件: {url}")
+                            elif 'image_path' in data_item:
+                                url = data_item['image_path']
+                                logger.info(f"从image_path字段提取的URL: {url}")
+                            else:
+                                # 如果没有找到URL，创建一个本地占位图像
+                                logger.info("响应中没有找到URL，创建占位图像")
+                                from PIL import Image, ImageDraw, ImageFont
+                                import tempfile
+                                import os
+                                
+                                # 创建一个简单的图像，显示提示词
+                                img = Image.new('RGB', (800, 600), color=(73, 109, 137))
+                                d = ImageDraw.Draw(img)
+                                
+                                # 尝试加载字体，如果失败则使用默认字体
+                                try:
+                                    font = ImageFont.truetype("arial.ttf", 20)
+                                except IOError:
+                                    font = ImageFont.load_default()
+                                
+                                # 在图像上绘制文本
+                                d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
+                                d.text((10, 50), "ModelScope未返回图像URL", fill=(255, 255, 0), font=font)
+                                d.text((10, 90), f"响应: {str(result)[:200]}...", fill=(255, 255, 0), font=font)
+                                
+                                # 保存到临时文件
+                                temp_dir = tempfile.gettempdir()
+                                temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                                img.save(temp_file)
+                                
+                                # 使用文件URL
+                                url = f"file://{temp_file}"
+                                logger.info(f"创建了本地占位图像: {url}")
+                        else:
+                            logger.error(f"无法从ModelScope响应中提取URL: {result}")
+                            return None
+                    
+                    # 添加到生成的图像列表
+                    from datetime import datetime
+                    generated_images.append({
+                        "url": url,
+                        "prompt": prompt,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    
+                    return url
+                
+                except Exception as modelscope_error:
+                    logger.error(f"使用ModelScope生成图像失败: {modelscope_error}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 尝试使用ModelScope的另一个端点
+                    try:
+                        logger.info("尝试使用ModelScope的另一个端点")
+                        
+                        import requests
+                        import json
+                        
+                        # 构建另一个可能的API URL - 尝试第三个已知的端点
+                        if "://" in api_base_str:
+                            protocol, rest = api_base_str.split("://", 1)
+                            domain = rest.split("/")[0]
+                            api_url = f"{protocol}://{domain}/api/v1/models/damo/cv_diffusion_text-to-image-synthesis/inference"
+                        else:
+                            api_url = f"https://{api_base_str}/api/v1/models/damo/cv_diffusion_text-to-image-synthesis/inference"
+                        
+                        logger.info(f"使用ModelScope备选API URL: {api_url}")
+                        
+                        headers = {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {image_model['client'].api_key}"
+                        }
+                        
+                        # 构建请求数据
+                        data = {
+                            "prompt": prompt,
+                            "width": int(size.split("x")[0]),
+                            "height": int(size.split("x")[1])
+                        }
+                        
+                        # 发送请求
+                        logger.info(f"发送请求到ModelScope备选端点: {api_url}")
+                        logger.info(f"请求数据: {data}")
+                        response = requests.post(api_url, headers=headers, json=data)
+                        response.raise_for_status()
+                        
+                        # 解析响应
+                        result = response.json()
+                        logger.info(f"ModelScope备选端点响应: {result}")
+                        
+                        # 从响应中提取URL或图像数据
+                        if 'output' in result and 'output_imgs' in result['output'] and len(result['output']['output_imgs']) > 0:
+                            # 处理Base64编码的图像
+                            from PIL import Image
+                            import io
+                            import base64
+                            import tempfile
+                            import os
+                            
+                            base64_data = result['output']['output_imgs'][0]
+                            image_data = base64.b64decode(base64_data)
+                            
+                            # 保存到临时文件
+                            temp_dir = tempfile.gettempdir()
+                            temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                            
+                            with open(temp_file, "wb") as f:
+                                f.write(image_data)
+                            
+                            # 使用文件URL
+                            url = f"file://{temp_file}"
+                            logger.info(f"创建了Base64图像文件: {url}")
+                            
+                            # 添加到生成的图像列表
+                            from datetime import datetime
+                            generated_images.append({
+                                "url": url,
+                                "prompt": prompt,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                            
+                            return url
+                        else:
+                            logger.error(f"无法从ModelScope备选端点响应中提取图像数据: {result}")
+                            return None
+                    
+                    except Exception as backup_error:
+                        logger.error(f"使用ModelScope备选端点生成图像失败: {backup_error}")
+                        logger.error(traceback.format_exc())
+                        return None
+            
             # 检查是否是OpenRouter API
             is_openrouter = "openrouter.ai" in api_base_str
             if is_openrouter:
@@ -818,401 +1028,34 @@ def generate_image(image_model, prompt: str, size: str = "1024x1024") -> Optiona
                     logger.error(traceback.format_exc())
                     return None
             
-            if "localhost" in api_base_str or "127.0.0.1" in api_base_str:
-                is_local_server = True
-                logger.info(f"检测到本地图像服务器: {api_base_str}")
+            # 标准OpenAI API
+            try:
+                response = image_model["client"].images.generate(
+                    model=image_model["model"],
+                    prompt=prompt,
+                    size=size,
+                    quality="standard",
+                    n=1,
+                )
+                url = response.data[0].url
                 
-                # 检查是否是jimeng模型
-                is_jimeng = image_model["model"].lower() == "jimeng"
-                if is_jimeng:
-                    logger.info("检测到jimeng模型，使用专用API路径")
-                    try:
-                        # 构建正确的API URL
-                        if "://" in api_base_str:
-                            protocol, rest = api_base_str.split("://", 1)
-                            domain = rest.split("/")[0]
-                            api_url = f"{protocol}://{domain}/v1/chat/completions"
-                        else:
-                            api_url = f"http://{api_base_str}/v1/chat/completions"
-                        
-                        logger.info(f"使用jimeng专用API URL: {api_url}")
-                        
-                        # 使用requests直接调用API
-                        import requests
-                        import json
-                        
-                        headers = {
-                            "Content-Type": "application/json"
-                        }
-                        if image_model["client"].api_key:
-                            headers["Authorization"] = f"Bearer {image_model['client'].api_key}"
-                        
-                        # 构建jimeng模型的请求数据
-                        data = {
-                            "model": image_model["model"],
-                            "messages": [
-                                {"role": "system", "content": "你是一个图像生成助手。请根据用户的提示生成图像。"},
-                                {"role": "user", "content": f"生成图像：{prompt}"}
-                            ],
-                            "temperature": 0.7,
-                            "stream": False
-                        }
-                        
-                        # 发送请求
-                        logger.info(f"发送请求到jimeng模型: {api_url}")
-                        response = requests.post(api_url, headers=headers, json=data)
-                        response.raise_for_status()
-                        
-                        # 解析响应
-                        result = response.json()
-                        logger.info(f"jimeng模型响应: {result}")
-                        
-                        # 从响应中提取文本
-                        if 'choices' in result and len(result['choices']) > 0 and 'message' in result['choices'][0]:
-                            generated_text = result['choices'][0]['message']['content']
-                            logger.info(f"jimeng模型生成的文本: {generated_text}")
-                            
-                            # 检查是否包含URL
-                            import re
-                            url_match = re.search(r'https?://\S+', generated_text)
-                            if url_match:
-                                url = url_match.group(0)
-                                logger.info(f"从响应中提取的URL: {url}")
-                            else:
-                                # 如果没有URL，创建一个本地占位图像
-                                logger.info("响应中没有URL，创建占位图像")
-                                from PIL import Image, ImageDraw, ImageFont
-                                import tempfile
-                                import os
-                                
-                                # 创建一个简单的图像，显示提示词
-                                img = Image.new('RGB', (800, 600), color=(73, 109, 137))
-                                d = ImageDraw.Draw(img)
-                                
-                                # 尝试加载字体，如果失败则使用默认字体
-                                try:
-                                    font = ImageFont.truetype("arial.ttf", 20)
-                                except IOError:
-                                    font = ImageFont.load_default()
-                                
-                                # 在图像上绘制文本
-                                d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
-                                d.text((10, 50), "jimeng模型未返回图像URL", fill=(255, 255, 0), font=font)
-                                d.text((10, 90), f"生成的文本: {generated_text[:200]}...", fill=(255, 255, 0), font=font)
-                                
-                                # 保存到临时文件
-                                temp_dir = tempfile.gettempdir()
-                                temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
-                                img.save(temp_file)
-                                
-                                # 使用文件URL
-                                url = f"file://{temp_file}"
-                                logger.info(f"创建了本地占位图像: {url}")
-                        else:
-                            logger.error(f"无法从jimeng模型响应中提取文本: {result}")
-                            return None
-                        
-                        # 添加到生成的图像列表
-                        from datetime import datetime
-                        generated_images.append({
-                            "url": url,
-                            "prompt": prompt,
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        })
-                        
-                        return url
-                    
-                    except Exception as jimeng_error:
-                        logger.error(f"使用jimeng模型生成图像失败: {jimeng_error}")
-                        logger.error(traceback.format_exc())
-                        return None
+                # 添加到生成的图像列表
+                from datetime import datetime
+                generated_images.append({
+                    "url": url,
+                    "prompt": prompt,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
                 
-                # 如果不是jimeng模型，使用标准的聊天API
-                logger.info("本地服务器需要使用特定API路径，尝试使用OpenAI客户端")
-                try:
-                    # 使用文本生成API代替图像生成API
-                    from openai import OpenAI
-                    client = OpenAI(
-                        api_key=image_model["client"].api_key,
-                        base_url=api_base_str
-                    )
-                    
-                    # 构建提示词，请求模型生成图像描述或URL
-                    response = client.chat.completions.create(
-                        model=image_model["model"],
-                        messages=[
-                            {"role": "system", "content": "你是一个图像生成助手。请根据用户的提示生成图像描述或URL。"},
-                            {"role": "user", "content": f"生成图像：{prompt}"}
-                        ],
-                        temperature=0.7,
-                    )
-                    
-                    # 从响应中提取文本
-                    generated_text = response.choices[0].message.content
-                    logger.info(f"本地服务器响应文本: {generated_text}")
-                    
-                    # 检查是否包含URL
-                    import re
-                    url_match = re.search(r'https?://\S+', generated_text)
-                    if url_match:
-                        url = url_match.group(0)
-                        logger.info(f"从响应中提取的URL: {url}")
-                    else:
-                        # 如果没有URL，创建一个本地占位图像
-                        logger.info("响应中没有URL，创建占位图像")
-                        from PIL import Image, ImageDraw, ImageFont
-                        import tempfile
-                        import os
-                        
-                        # 创建一个简单的图像，显示提示词
-                        img = Image.new('RGB', (800, 600), color=(73, 109, 137))
-                        d = ImageDraw.Draw(img)
-                        
-                        # 尝试加载字体，如果失败则使用默认字体
-                        try:
-                            font = ImageFont.truetype("arial.ttf", 20)
-                        except IOError:
-                            font = ImageFont.load_default()
-                        
-                        # 在图像上绘制文本
-                        d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
-                        d.text((10, 50), "本地服务器未返回图像URL", fill=(255, 255, 0), font=font)
-                        d.text((10, 90), f"生成的文本: {generated_text[:200]}...", fill=(255, 255, 0), font=font)
-                        
-                        # 保存到临时文件
-                        temp_dir = tempfile.gettempdir()
-                        temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
-                        img.save(temp_file)
-                        
-                        # 使用文件URL
-                        url = f"file://{temp_file}"
-                        logger.info(f"创建了本地占位图像: {url}")
-                    
-                    # 添加到生成的图像列表
-                    from datetime import datetime
-                    generated_images.append({
-                        "url": url,
-                        "prompt": prompt,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                    
-                    return url
-                    
-                except Exception as chat_error:
-                    logger.error(f"使用聊天API调用本地服务器失败: {chat_error}")
-                    logger.error(traceback.format_exc())
-                    return None
-            else:
-                # 标准OpenAI API
-                try:
-                    response = image_model["client"].images.generate(
-                        model=image_model["model"],
-                        prompt=prompt,
-                        size=size,
-                        quality="standard",
-                        n=1,
-                    )
-                    url = response.data[0].url
-                except Exception as api_error:
-                    logger.error(f"使用标准API生成图像失败: {api_error}")
-                    logger.error(traceback.format_exc())
-                    
-                    # 尝试使用聊天API作为备选方案
-                    logger.info("尝试使用聊天API作为备选方案")
-                    try:
-                        # 使用聊天API
-                        response = image_model["client"].chat.completions.create(
-                            model=image_model["model"],
-                            messages=[
-                                {"role": "system", "content": "你是一个图像生成助手。请根据用户的提示生成图像描述或URL。"},
-                                {"role": "user", "content": f"生成图像：{prompt}"}
-                            ],
-                            temperature=0.7,
-                        )
-                        
-                        # 从响应中提取文本
-                        generated_text = response.choices[0].message.content
-                        logger.info(f"聊天API响应文本: {generated_text}")
-                        
-                        # 检查是否包含URL
-                        import re
-                        url_match = re.search(r'https?://\S+', generated_text)
-                        if url_match:
-                            url = url_match.group(0)
-                            logger.info(f"从响应中提取的URL: {url}")
-                        else:
-                            # 如果没有URL，创建一个本地占位图像
-                            logger.info("响应中没有URL，创建占位图像")
-                            from PIL import Image, ImageDraw, ImageFont
-                            import tempfile
-                            import os
-                            
-                            # 创建一个简单的图像，显示提示词
-                            img = Image.new('RGB', (800, 600), color=(73, 109, 137))
-                            d = ImageDraw.Draw(img)
-                            
-                            # 尝试加载字体，如果失败则使用默认字体
-                            try:
-                                font = ImageFont.truetype("arial.ttf", 20)
-                            except IOError:
-                                font = ImageFont.load_default()
-                            
-                            # 在图像上绘制文本
-                            d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
-                            d.text((10, 50), "API未返回图像URL", fill=(255, 255, 0), font=font)
-                            d.text((10, 90), f"生成的文本: {generated_text[:200]}...", fill=(255, 255, 0), font=font)
-                            
-                            # 保存到临时文件
-                            temp_dir = tempfile.gettempdir()
-                            temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
-                            img.save(temp_file)
-                            
-                            # 使用文件URL
-                            url = f"file://{temp_file}"
-                            logger.info(f"创建了本地占位图像: {url}")
-                    except Exception as chat_error:
-                        logger.error(f"使用聊天API作为备选方案失败: {chat_error}")
-                        logger.error(traceback.format_exc())
-                        return None
-            
-            # 添加到生成的图像列表
-            from datetime import datetime
-            generated_images.append({
-                "url": url,
-                "prompt": prompt,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-            
-            return url
+                return url
+            except Exception as api_error:
+                logger.error(f"使用标准API生成图像失败: {api_error}")
+                logger.error(traceback.format_exc())
+                return None
         else:
             raise ValueError(f"不支持的图像模型类型: {image_model['type']}")
     except Exception as e:
         logger.error(f"生成图像失败: {e}")
-        logger.error(traceback.format_exc())
-        return None
-
-def generate_video(video_model, prompt: str) -> Optional[str]:
-    """
-    生成视频
-    
-    Args:
-        video_model: 视频模型
-        prompt: 提示词
-        
-    Returns:
-        视频URL或None
-    """
-    if not video_model:
-        return None
-    
-    try:
-        if video_model["type"] == "openai":
-            # 检查是否是OpenRouter API
-            api_base = video_model["client"].base_url
-            api_base_str = str(api_base) if api_base else ""
-            is_openrouter = "openrouter.ai" in api_base_str
-            
-            if is_openrouter:
-                logger.info(f"检测到OpenRouter API: {api_base_str}")
-                try:
-                    # OpenRouter不支持标准的videos.generate方法，需要使用chat.completions
-                    logger.info("使用OpenRouter的聊天API生成视频")
-                    
-                    # 使用requests直接调用API
-                    import requests
-                    import json
-                    
-                    # 构建API URL
-                    api_url = f"{api_base_str}/chat/completions"
-                    if not api_url.startswith("http"):
-                        api_url = f"https://{api_url}"
-                    
-                    # 修复URL中可能出现的双斜杠问题
-                    api_url = api_url.replace("//chat", "/chat")
-                    
-                    logger.info(f"使用OpenRouter API URL: {api_url}")
-                    
-                    headers = {
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {video_model['client'].api_key}"
-                    }
-                    
-                    # 构建请求数据
-                    data = {
-                        "model": video_model["model"],
-                        "messages": [
-                            {"role": "system", "content": "你是一个视频生成助手。请根据用户的提示生成高质量的视频。"},
-                            {"role": "user", "content": f"生成一段视频：{prompt}。请直接返回视频链接，不要有任何文字说明。"}
-                        ],
-                        "temperature": 0.7,
-                        "max_tokens": 1024
-                    }
-                    
-                    # 发送请求
-                    logger.info(f"发送请求到OpenRouter: {api_url}")
-                    logger.info(f"请求数据: {data}")
-                    response = requests.post(api_url, headers=headers, json=data)
-                    response.raise_for_status()
-                    
-                    # 解析响应
-                    result = response.json()
-                    logger.info(f"OpenRouter响应: {result}")
-                    
-                    # 从响应中提取文本
-                    if 'choices' in result and len(result['choices']) > 0 and 'message' in result['choices'][0]:
-                        generated_text = result['choices'][0]['message']['content']
-                        logger.info(f"OpenRouter生成的文本: {generated_text}")
-                        
-                        # 检查是否包含URL
-                        import re
-                        url_match = re.search(r'https?://\S+', generated_text)
-                        if url_match:
-                            url = url_match.group(0)
-                            # 清理URL，移除可能的引号或括号
-                            url = url.rstrip(',.;:!?)]}\'\"')
-                            logger.info(f"从响应中提取的URL: {url}")
-                        else:
-                            logger.error(f"无法从OpenRouter响应中提取视频URL")
-                            return None
-                    else:
-                        logger.error(f"无法从OpenRouter响应中提取文本: {result}")
-                        return None
-                    
-                    # 添加到生成的视频列表
-                    from datetime import datetime
-                    generated_videos.append({
-                        "url": url,
-                        "prompt": prompt,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                    
-                    return url
-                
-                except Exception as openrouter_error:
-                    logger.error(f"使用OpenRouter生成视频失败: {openrouter_error}")
-                    logger.error(traceback.format_exc())
-                    return None
-            else:
-                # 标准OpenAI API
-                response = video_model["client"].videos.generate(
-                    model=video_model["model"],
-                    prompt=prompt,
-                )
-                url = response.data[0].url
-            
-            # 添加到生成的视频列表
-            from datetime import datetime
-            generated_videos.append({
-                "url": url,
-                "prompt": prompt,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-            
-            return url
-        else:
-            raise ValueError(f"不支持的视频模型类型: {video_model['type']}")
-    except Exception as e:
-        logger.error(f"生成视频失败: {e}")
         logger.error(traceback.format_exc())
         return None
 
@@ -1535,9 +1378,9 @@ class DocumentProcessor:
             return response
         
         # 检查是否是图像生成命令
-        image_match = re.match(r"^生成图像[:：](.+)$", query)
+        image_match = re.match(r"^生成(图像|图片)[:：](.+)$", query)
         if image_match and self.image_model:
-            prompt = image_match.group(1).strip()
+            prompt = image_match.group(2).strip()
             logger.info(f"正在生成图像，提示词: {prompt}")
             image_url = generate_image(self.image_model, prompt)
             
@@ -1706,9 +1549,9 @@ def main():
         else:
             try:
                 # 检查是否是图像生成命令
-                image_match = re.match(r"^生成图像[:：](.+)$", query)
+                image_match = re.match(r"^生成(图像|图片)[:：](.+)$", query)
                 if image_match and processor.image_model:
-                    prompt = image_match.group(1).strip()
+                    prompt = image_match.group(2).strip()
                     logger.info(f"正在生成图像，提示词: {prompt}")
                     image_url = generate_image(processor.image_model, prompt)
                     

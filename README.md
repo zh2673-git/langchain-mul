@@ -356,7 +356,7 @@ echo ".vscode/" >> .gitignore
 git add .
 
 # 提交更改
-git commit -m "初始提交：文档聊天系统"
+git commit -m "初始提交：文档聊天图片视频系统"
 
 # 添加远程仓库
 git remote add origin https://github.com/您的用户名/您的仓库名.git
