@@ -1266,6 +1266,174 @@ def display_image(url: str) -> None:
         logger.error(f"显示图像失败: {e}")
         print(f"图像URL: {url}")
 
+def generate_video(video_model, prompt: str, duration: int = 3) -> Optional[str]:
+    """
+    生成视频
+    
+    Args:
+        video_model: 视频模型
+        prompt: 提示词
+        duration: 视频时长（秒）
+        
+    Returns:
+        视频URL或None
+    """
+    if not video_model:
+        return None
+    
+    try:
+        if video_model["type"] == "openai":
+            # 检查是否是jimeng模型
+            is_jimeng = video_model['model'].lower() == 'jimeng'
+            
+            if is_jimeng:
+                logger.info(f"检测到jimeng模型，使用聊天完成API生成视频，提示词: {prompt}")
+                
+                # 使用requests直接调用API
+                import requests
+                import json
+                
+                # 构建API URL
+                api_base_str = str(video_model["client"].base_url) if video_model["client"].base_url else ""
+                
+                if "://" in api_base_str:
+                    protocol, rest = api_base_str.split("://", 1)
+                    domain = rest.split("/")[0]
+                    api_url = f"{protocol}://{domain}/v1/chat/completions"
+                else:
+                    api_url = f"http://{api_base_str}/v1/chat/completions"
+                
+                logger.info(f"使用jimeng API URL: {api_url}")
+                
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {video_model['client'].api_key}"
+                }
+                
+                # 构建请求数据
+                data = {
+                    "model": video_model["model"],
+                    "messages": [
+                        {"role": "system", "content": "你是一个视频生成助手。请根据用户的提示生成高质量的视频。"},
+                        {"role": "user", "content": f"生成一段视频：{prompt}。视频时长约{duration}秒。请直接返回视频链接，不要有任何文字说明。"}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                }
+                
+                # 发送请求
+                logger.info(f"发送请求到jimeng: {api_url}")
+                logger.info(f"请求数据: {data}")
+                response = requests.post(api_url, headers=headers, json=data)
+                response.raise_for_status()
+                
+                # 解析响应
+                result = response.json()
+                logger.info(f"jimeng响应: {result}")
+                
+                # 从响应中提取文本
+                if 'choices' in result and len(result['choices']) > 0 and 'message' in result['choices'][0]:
+                    generated_text = result['choices'][0]['message']['content']
+                    logger.info(f"jimeng生成的文本: {generated_text}")
+                    
+                    # 检查是否包含URL
+                    import re
+                    url_match = re.search(r'https?://\S+', generated_text)
+                    
+                    if url_match:
+                        url = url_match.group(0)
+                        # 清理URL，移除可能的引号或括号
+                        url = url.rstrip(',.;:!?)]}\'\"')
+                        logger.info(f"从响应中提取的视频URL: {url}")
+                    else:
+                        # 如果没有URL，创建一个本地占位图像
+                        logger.info("响应中没有视频URL，创建占位图像")
+                        from PIL import Image, ImageDraw, ImageFont
+                        import tempfile
+                        import os
+                        
+                        # 创建一个简单的图像，显示提示词
+                        img = Image.new('RGB', (800, 600), color=(73, 109, 137))
+                        d = ImageDraw.Draw(img)
+                        
+                        # 尝试加载字体，如果失败则使用默认字体
+                        try:
+                            font = ImageFont.truetype("arial.ttf", 20)
+                        except IOError:
+                            font = ImageFont.load_default()
+                        
+                        # 在图像上绘制文本
+                        d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
+                        d.text((10, 50), "jimeng未返回视频URL", fill=(255, 255, 0), font=font)
+                        d.text((10, 90), f"生成的文本: {generated_text[:200]}...", fill=(255, 255, 0), font=font)
+                        
+                        # 保存到临时文件
+                        temp_dir = tempfile.gettempdir()
+                        temp_file = os.path.join(temp_dir, f"generated_video_placeholder_{hash(prompt)}.png")
+                        img.save(temp_file)
+                        
+                        # 使用文件URL
+                        url = f"file://{temp_file}"
+                        logger.info(f"创建了本地占位图像: {url}")
+                else:
+                    logger.error(f"无法从jimeng响应中提取文本: {result}")
+                    return None
+                
+                # 添加到生成的视频列表
+                from datetime import datetime
+                generated_videos.append({
+                    "url": url,
+                    "prompt": prompt,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                
+                return url
+            else:
+                # 标准OpenAI视频生成API
+                try:
+                    logger.info(f"使用标准API生成视频，模型: {video_model['model']}, 提示词: {prompt}")
+                    
+                    # 检查是否支持视频生成
+                    if hasattr(video_model["client"], "videos") and hasattr(video_model["client"].videos, "generate"):
+                        response = video_model["client"].videos.generate(
+                            model=video_model["model"],
+                            prompt=prompt,
+                            duration=duration
+                        )
+                        
+                        logger.info(f"API响应: {response}")
+                        
+                        # 检查响应
+                        if response is None or not hasattr(response, 'data') or response.data is None or len(response.data) == 0:
+                            logger.error("API返回了无效响应")
+                            return None
+                        
+                        url = response.data[0].url
+                    else:
+                        # 如果不支持视频生成API，尝试使用图像生成API创建一个静态图像
+                        logger.warning("视频生成API不可用，尝试使用图像生成API创建静态图像")
+                        url = generate_image(video_model, prompt)
+                    
+                    # 添加到生成的视频列表
+                    from datetime import datetime
+                    generated_videos.append({
+                        "url": url,
+                        "prompt": prompt,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    
+                    return url
+                except Exception as api_error:
+                    logger.error(f"使用标准API生成视频失败: {api_error}")
+                    logger.error(traceback.format_exc())
+                    return None
+        else:
+            raise ValueError(f"不支持的视频模型类型: {video_model['type']}")
+    except Exception as e:
+        logger.error(f"生成视频失败: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
 def open_web_browser(url: str) -> None:
     """
     打开Web浏览器
