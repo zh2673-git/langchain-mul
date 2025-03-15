@@ -1030,24 +1030,207 @@ def generate_image(image_model, prompt: str, size: str = "1024x1024") -> Optiona
             
             # 标准OpenAI API
             try:
-                response = image_model["client"].images.generate(
-                    model=image_model["model"],
-                    prompt=prompt,
-                    size=size,
-                    quality="standard",
-                    n=1,
-                )
-                url = response.data[0].url
+                logger.info(f"使用标准API生成图像，模型: {image_model['model']}, 提示词: {prompt}")
                 
-                # 添加到生成的图像列表
-                from datetime import datetime
-                generated_images.append({
-                    "url": url,
-                    "prompt": prompt,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
+                # 检查是否是jimeng模型
+                is_jimeng = image_model['model'].lower() == 'jimeng'
                 
-                return url
+                if is_jimeng:
+                    logger.info("检测到jimeng模型，使用聊天完成API")
+                    
+                    # 使用requests直接调用API
+                    import requests
+                    import json
+                    
+                    # 构建API URL
+                    api_base_str = str(image_model["client"].base_url) if image_model["client"].base_url else ""
+                    
+                    if "://" in api_base_str:
+                        protocol, rest = api_base_str.split("://", 1)
+                        domain = rest.split("/")[0]
+                        api_url = f"{protocol}://{domain}/v1/chat/completions"
+                    else:
+                        api_url = f"http://{api_base_str}/v1/chat/completions"
+                    
+                    logger.info(f"使用jimeng API URL: {api_url}")
+                    
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {image_model['client'].api_key}"
+                    }
+                    
+                    # 构建请求数据
+                    data = {
+                        "model": image_model["model"],
+                        "messages": [
+                            {"role": "system", "content": "你是一个图像生成助手。请根据用户的提示生成高质量的图像。"},
+                            {"role": "user", "content": f"生成一张图片：{prompt}。请直接返回图像，不要有任何文字说明。"}
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 1024
+                    }
+                    
+                    # 发送请求
+                    logger.info(f"发送请求到jimeng: {api_url}")
+                    logger.info(f"请求数据: {data}")
+                    response = requests.post(api_url, headers=headers, json=data)
+                    response.raise_for_status()
+                    
+                    # 解析响应
+                    result = response.json()
+                    logger.info(f"jimeng响应: {result}")
+                    
+                    # 从响应中提取文本
+                    if 'choices' in result and len(result['choices']) > 0 and 'message' in result['choices'][0]:
+                        generated_text = result['choices'][0]['message']['content']
+                        logger.info(f"jimeng生成的文本: {generated_text}")
+                        
+                        # 检查是否包含URL或Base64图像
+                        import re
+                        url_match = re.search(r'https?://\S+', generated_text)
+                        base64_match = re.search(r'data:image/\w+;base64,([^"\'\\s]+)', generated_text)
+                        
+                        if url_match:
+                            url = url_match.group(0)
+                            # 清理URL，移除可能的引号或括号
+                            url = url.rstrip(',.;:!?)]}\'\"')
+                            logger.info(f"从响应中提取的URL: {url}")
+                        elif base64_match:
+                            # 处理Base64编码的图像
+                            from PIL import Image
+                            import io
+                            import base64
+                            import tempfile
+                            import os
+                            
+                            base64_data = base64_match.group(1)
+                            image_data = base64.b64decode(base64_data)
+                            
+                            # 保存到临时文件
+                            temp_dir = tempfile.gettempdir()
+                            temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                            
+                            with open(temp_file, "wb") as f:
+                                f.write(image_data)
+                            
+                            # 使用文件URL
+                            url = f"file://{temp_file}"
+                            logger.info(f"创建了Base64图像文件: {url}")
+                        else:
+                            # 如果没有URL或Base64，创建一个本地占位图像
+                            logger.info("响应中没有URL或Base64图像，创建占位图像")
+                            from PIL import Image, ImageDraw, ImageFont
+                            import tempfile
+                            import os
+                            
+                            # 创建一个简单的图像，显示提示词
+                            img = Image.new('RGB', (800, 600), color=(73, 109, 137))
+                            d = ImageDraw.Draw(img)
+                            
+                            # 尝试加载字体，如果失败则使用默认字体
+                            try:
+                                font = ImageFont.truetype("arial.ttf", 20)
+                            except IOError:
+                                font = ImageFont.load_default()
+                            
+                            # 在图像上绘制文本
+                            d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
+                            d.text((10, 50), "jimeng未返回图像URL", fill=(255, 255, 0), font=font)
+                            d.text((10, 90), f"生成的文本: {generated_text[:200]}...", fill=(255, 255, 0), font=font)
+                            
+                            # 保存到临时文件
+                            temp_dir = tempfile.gettempdir()
+                            temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                            img.save(temp_file)
+                            
+                            # 使用文件URL
+                            url = f"file://{temp_file}"
+                            logger.info(f"创建了本地占位图像: {url}")
+                    else:
+                        logger.error(f"无法从jimeng响应中提取文本: {result}")
+                        return None
+                    
+                    # 添加到生成的图像列表
+                    from datetime import datetime
+                    generated_images.append({
+                        "url": url,
+                        "prompt": prompt,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    
+                    return url
+                else:
+                    # 使用标准的图像生成API
+                    response = image_model["client"].images.generate(
+                        model=image_model["model"],
+                        prompt=prompt,
+                        size=size,
+                        quality="standard",
+                        n=1,
+                    )
+                    
+                    logger.info(f"API响应: {response}")
+                    
+                    # 检查响应是否为None或data字段是否为None
+                    if response is None:
+                        logger.error("API返回了None响应")
+                        return None
+                    
+                    if not hasattr(response, 'data') or response.data is None:
+                        logger.error("API响应中没有data字段或data为None")
+                        # 创建一个本地占位图像
+                        from PIL import Image, ImageDraw, ImageFont
+                        import tempfile
+                        import os
+                        
+                        # 创建一个简单的图像，显示提示词
+                        img = Image.new('RGB', (800, 600), color=(73, 109, 137))
+                        d = ImageDraw.Draw(img)
+                        
+                        # 尝试加载字体，如果失败则使用默认字体
+                        try:
+                            font = ImageFont.truetype("arial.ttf", 20)
+                        except IOError:
+                            font = ImageFont.load_default()
+                        
+                        # 在图像上绘制文本
+                        d.text((10, 10), f"提示词: {prompt}", fill=(255, 255, 0), font=font)
+                        d.text((10, 50), "API返回了无效响应", fill=(255, 255, 0), font=font)
+                        
+                        # 保存到临时文件
+                        temp_dir = tempfile.gettempdir()
+                        temp_file = os.path.join(temp_dir, f"generated_image_{hash(prompt)}.png")
+                        img.save(temp_file)
+                        
+                        # 使用文件URL
+                        url = f"file://{temp_file}"
+                        logger.info(f"创建了本地占位图像: {url}")
+                        
+                        # 添加到生成的图像列表
+                        from datetime import datetime
+                        generated_images.append({
+                            "url": url,
+                            "prompt": prompt,
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        })
+                        
+                        return url
+                    
+                    if len(response.data) == 0:
+                        logger.error("API响应中data数组为空")
+                        return None
+                    
+                    url = response.data[0].url
+                    
+                    # 添加到生成的图像列表
+                    from datetime import datetime
+                    generated_images.append({
+                        "url": url,
+                        "prompt": prompt,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+                    
+                    return url
             except Exception as api_error:
                 logger.error(f"使用标准API生成图像失败: {api_error}")
                 logger.error(traceback.format_exc())
